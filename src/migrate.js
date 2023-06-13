@@ -192,6 +192,11 @@ async function sendToPostHog({jsonDirPath, batchSize}) {
 
   for (let i = 0; i < jsonFileCount; ++i) {
     const jsonFileName = files[i]
+
+    if (jsonFileName === '.DS_Store') {
+      continue;
+    }
+
     const nextFileName = path.resolve(jsonDirPath, jsonFileName)
     const json = await fs.readJson(nextFileName)
 
@@ -206,12 +211,11 @@ async function sendToPostHog({jsonDirPath, batchSize}) {
     // or the last file has just been processed
     if(shouldMakeBatchRequest(eventsMessages, batchSize, i, jsonFileCount)) {
       
-      await postHogBatchEventRequest({eventsMessages})
+      batchRequestCount += await postHogBatchEventRequest({eventsMessages})
 
       // Records which JSON file has been successfully processed in case of failure and the need to resume
       config.set('last_json_imported', nextFileName)
       
-      batchRequestCount++
       eventCount += eventsMessages.length
       
       // reset event batch
@@ -273,39 +277,71 @@ async function exportCacheDataToAliasFile()
   cache.clear();
 }
 
-// function getRequestSize(request) {
-//   const size = new TextEncoder().encode(JSON.stringify(request)).length
-//   const kiloBytes = size / 1024;
-//   const megaBytes = kiloBytes / 1024;
+function splitTheRequests(request) {
+  const size = new TextEncoder().encode(JSON.stringify(request)).length
+  const kiloBytes = size / 1024;
+  const megaBytes = kiloBytes / 1024;
 
-//   return {size, kiloBytes, megaBytes}
-// }
+  // console.log(megaBytes);
 
-async function postHogBatchEventRequest({eventsMessages}) {
-  // Create batch per file https://posthog.com/docs/api/post-only-endpoints#batch-events
-  const requestBody = {
-    api_key: config.get('POSTHOG_PROJECT_API_KEY'),
-    batch: eventsMessages,
-    '$lib': pkg.name,
-    '$lib_version': pkg.version,
-  }
-  // console.log('>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>')
-  // console.log('Request size', getRequestSize(requestBody))
-  // console.log(JSON.stringify(requestBody, null, 2))
-  
-  // Makes sequential requests (rather than parallel)
-  // but it may be worth adding a small wait inbetween requests via a config option.
-  const response = await fetch(`${config.get('POSTHOG_API_HOST')}/batch`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(requestBody)
-  })
-  
-  if(response.status !== 200) {
-    throw new Error(`Unexpected response code from PostHog API.\nStatus: ${response.status} \nStatus Text: ${response.statusText}\nBody: ${JSON.stringify(await response.json())}`)
-  }
+  return Math.ceil(megaBytes / 10)
 }
+
+async function postHogBatchEventRequest({ eventsMessages }) {
+
+  let numberOfBatch = splitTheRequests(eventsMessages);
+  // console.log("numberOfBatch: ", numberOfBatch);
+
+
+  const batchSize =  Math.ceil(eventsMessages.length / numberOfBatch); // Adjust the batch size as per your requirements
+  
+  // console.log("batch size", batchSize)
+  // console.log("number batch", numberOfBatch)
+
+  let requestCount = 0; // Counter variable for request count
+
+  const apiKey = config.get('POSTHOG_PROJECT_API_KEY');
+  const posthogApiHost = config.get('POSTHOG_API_HOST');
+  const libName = pkg.name;
+  const libVersion = pkg.version;
+
+  const totalEvents = eventsMessages.length;
+  let processedEvents = 0;
+
+  while (processedEvents < totalEvents) {
+    const batch = eventsMessages.slice(processedEvents, processedEvents + batchSize);
+
+    const requestBody = {
+      api_key: apiKey,
+      batch: batch,
+      '$lib': libName,
+      '$lib_version': libVersion,
+    };
+
+    const response = await fetch(`${posthogApiHost}/batch`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (response.status !== 200) {
+      throw new Error(`Unexpected response code from PostHog API.\nStatus: ${response.status} \nStatus Text: ${response.statusText}\nBody: ${JSON.stringify(await response.json())}`)    
+    }
+
+    await sleep(1000); // Sleep for 1000 milliseconds (1 seconds)
+
+    processedEvents += batch.length;
+    requestCount++;
+  }
+
+  return requestCount;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 
 export {exportFromAmplitude, unzipExport, sendToPostHog, sendAliasesToPostHog}
